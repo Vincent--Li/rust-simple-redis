@@ -45,6 +45,8 @@ pub enum RespError {
     InvalidFrameLength(isize),
     #[error("Frame is not complete")]
     NotComplete,
+    #[error("Parse error: {0}")]
+    ParseError(#[from] std::num::ParseIntError),
 }
 
 #[enum_dispatch(RespEncode)]
