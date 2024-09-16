@@ -32,17 +32,17 @@ pub trait RespEncode {
 
 #[enum_dispatch]
 pub trait RespDecode: Sized {
-    fn decode(buf: BytesMut) -> Result<Self, RespError>;
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError>;
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum RespError {
     #[error("Invalid frame {0}")]
     InvalidFrame(String),
     #[error("Invalid frame type {0}")]
     InvalidFrameType(String),
-    #[error("Invalid frame length")]
-    InvalidFrameLength,
+    #[error("Invalid frame length: {0}")]
+    InvalidFrameLength(isize),
     #[error("Frame is not complete")]
     NotComplete,
 }
