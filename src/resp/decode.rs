@@ -1,6 +1,12 @@
-use super::{RespDecode, RespError, RespFrame, SimpleError, SimpleString};
+use super::{
+    Array, BulkString, Null, NullArray, NullBulkString, RespDecode, RespError, RespFrame, Set,
+    SimpleError, SimpleString,
+};
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
+
+const CRLF: &[u8] = b"\r\n";
+const CRLF_LEN: usize = CRLF.len();
 
 impl RespDecode for RespFrame {
     fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
@@ -16,10 +22,11 @@ impl RespDecode for RespFrame {
 
 impl RespDecode for SimpleString {
     fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
-        let end = extract_simple_frame_data(buf, "+")?;
+        let prefix = "+";
+        let end = extract_simple_frame_data(buf, prefix)?;
 
         // split the buffer
-        let data = buf.split_to(end + 2);
+        let data = buf.split_to(end + CRLF_LEN);
         let s = String::from_utf8_lossy(&data[1..end]);
 
         Ok(SimpleString::new(s.to_string()))
@@ -28,12 +35,104 @@ impl RespDecode for SimpleString {
 
 impl RespDecode for SimpleError {
     fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
-        let end = extract_simple_frame_data(buf, "-")?;
+        let prefix = "-";
+        let end = extract_simple_frame_data(buf, prefix)?;
 
-        let data = buf.split_to(end + 2);
+        let data = buf.split_to(end + CRLF_LEN);
         let s = String::from_utf8_lossy(&data[1..end]);
 
         Ok(SimpleError::new(s.to_string()))
+    }
+}
+
+impl RespDecode for Null {
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
+        extract_fixed_data(buf, "_\r\n", "Null")?;
+        Ok(Null)
+    }
+}
+
+impl RespDecode for NullArray {
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
+        extract_fixed_data(buf, "*-1\r\n", "NullArray")?;
+        Ok(NullArray)
+    }
+}
+
+impl RespDecode for NullBulkString {
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
+        extract_fixed_data(buf, "$-1\r\n", "NullBulkString")?;
+        Ok(NullBulkString)
+    }
+}
+
+impl RespDecode for i64 {
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
+        let prefix = ":";
+        let end = extract_simple_frame_data(buf, prefix)?;
+        let data = buf.split_to(end + CRLF_LEN);
+        let s = String::from_utf8_lossy(&data[prefix.len()..end]);
+
+        Ok(s.parse()?)
+    }
+}
+
+impl RespDecode for bool {
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
+        match extract_fixed_data(buf, "#t\r\n", "Bool") {
+            Ok(_) => Ok(true),
+            Err(RespError::NotComplete) => Err(RespError::NotComplete),
+            Err(_) => match extract_fixed_data(buf, "#f\r\n", "Bool") {
+                Ok(_) => Ok(false),
+                Err(e) => Err(e),
+            },
+        }
+    }
+}
+
+impl RespDecode for BulkString {
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
+        let (end, len) = parse_length(buf, "$")?;
+        let remained = &buf[end + CRLF_LEN..];
+        if remained.len() < len + CRLF_LEN {
+            return Err(RespError::NotComplete);
+        }
+
+        buf.advance(end + CRLF_LEN);
+
+        let data = buf.split_to(len + CRLF_LEN);
+        Ok(BulkString::new(data[..len].to_vec()))
+    }
+}
+
+impl RespDecode for Array {
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
+        let prefix = "*";
+        let end = extract_simple_frame_data(buf, prefix)?;
+        let s = String::from_utf8_lossy(&buf[prefix.len()..end]);
+        let len = s.parse::<usize>()?;
+        let mut array = Vec::with_capacity(len);
+        for _ in 0..len {
+            let frame = RespFrame::decode(buf)?;
+            array.push(frame);
+        }
+        Ok(Array::new(array))
+    }
+}
+
+impl RespDecode for f64 {
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
+        let prefix = ",";
+        let end = extract_simple_frame_data(buf, prefix)?;
+        let data = buf.split_to(end + CRLF_LEN);
+        let s = String::from_utf8_lossy(&data[prefix.len()..end]);
+        Ok(s.parse()?)
+    }
+}
+
+impl RespDecode for Set {
+    fn decode(_buf: &mut BytesMut) -> Result<Self, RespError> {
+        todo!()
     }
 }
 
@@ -88,6 +187,12 @@ fn find_crlf(buf: &[u8], nth: usize) -> Option<usize> {
     None
 }
 
+fn parse_length(buf: &[u8], prefix: &str) -> Result<(usize, usize), RespError> {
+    let end = extract_simple_frame_data(buf, prefix)?;
+    let s = String::from_utf8_lossy(&buf[prefix.len()..end]);
+    Ok((end, s.parse()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +229,20 @@ mod tests {
 
         buf.extend_from_slice(b"-ERR unknown command 'hello'");
         let ret = SimpleError::decode(&mut buf);
+        assert_eq!(ret, Err(RespError::NotComplete));
+        Ok(())
+    }
+
+    #[test]
+    fn test_f64_decode() -> Result<()> {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(b",3.14768\r\n");
+
+        let frame = f64::decode(&mut buf)?;
+        assert_eq!(frame, 3.14768);
+
+        buf.extend_from_slice(b",3.14768");
+        let ret = f64::decode(&mut buf);
         assert_eq!(ret, Err(RespError::NotComplete));
         Ok(())
     }
