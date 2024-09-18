@@ -22,7 +22,10 @@ mod encode;
 use anyhow::Result;
 use bytes::BytesMut;
 use enum_dispatch::enum_dispatch;
-use std::{collections::BTreeMap, ops::Deref};
+use std::{
+    collections::BTreeMap,
+    ops::{Deref, DerefMut},
+};
 use thiserror::Error;
 
 #[enum_dispatch]
@@ -134,11 +137,23 @@ impl Deref for Map {
     }
 }
 
+impl DerefMut for Map {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl Deref for Set {
     type Target = Vec<RespFrame>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl DerefMut for Set {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -187,6 +202,30 @@ impl Set {
 
 impl BulkError {
     pub fn new(s: impl Into<String>) -> Self {
+        BulkError(s.into())
+    }
+}
+
+impl From<&str> for SimpleString {
+    fn from(s: &str) -> Self {
+        SimpleString(s.into())
+    }
+}
+
+impl From<&str> for SimpleError {
+    fn from(s: &str) -> Self {
+        SimpleError(s.into())
+    }
+}
+
+impl From<&str> for BulkString {
+    fn from(s: &str) -> Self {
+        BulkString(s.into())
+    }
+}
+
+impl From<&str> for BulkError {
+    fn from(s: &str) -> Self {
         BulkError(s.into())
     }
 }

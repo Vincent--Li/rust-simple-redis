@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use super::{
-    Array, BulkString, Null, NullArray, NullBulkString, RespDecode, RespError, RespFrame, Set,
-    SimpleError, SimpleString,
+    Array, BulkError, BulkString, Map, Null, NullArray, NullBulkString, RespDecode, RespError,
+    RespFrame, Set, SimpleError, SimpleString,
 };
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
@@ -13,9 +15,56 @@ impl RespDecode for RespFrame {
         let mut iter = buf.iter().peekable();
         match iter.peek() {
             Some(b'+') => {
-                todo!()
+                let frame = SimpleString::decode(buf)?;
+                Ok(frame.into())
             }
-            _ => todo!(),
+            Some(b'-') => {
+                let frame = SimpleError::decode(buf)?;
+                Ok(frame.into())
+            }
+            Some(b'*') => {
+                // try null array first
+                match NullArray::decode(buf) {
+                    Ok(frame) => Ok(frame.into()),
+                    Err(RespError::NotComplete) => Err(RespError::NotComplete),
+                    Err(_) => {
+                        let frame = Array::decode(buf)?;
+                        Ok(frame.into())
+                    }
+                }
+            }
+            Some(b':') => {
+                let frame = i64::decode(buf)?;
+                Ok(frame.into())
+            }
+            Some(b'#') => {
+                let frame = bool::decode(buf)?;
+                Ok(frame.into())
+            }
+            Some(b'$') => {
+                // try null bulk string first
+                match NullBulkString::decode(buf) {
+                    Ok(frame) => Ok(frame.into()),
+                    Err(RespError::NotComplete) => Err(RespError::NotComplete),
+                    Err(_) => {
+                        let frame = BulkString::decode(buf)?;
+                        Ok(frame.into())
+                    }
+                }
+            }
+            Some(b'~') => {
+                let frame = Set::decode(buf)?;
+                Ok(frame.into())
+            }
+            Some(b'%') => {
+                let frame = Map::decode(buf)?;
+                Ok(frame.into())
+            }
+            Some(b'!') => {
+                let frame = BulkError::decode(buf)?;
+                Ok(frame.into())
+            }
+            _ => Err(RespError::InvalidFrame("invalid frame type".into())),
         }
     }
 }
@@ -42,6 +91,17 @@ impl RespDecode for SimpleError {
         let s = String::from_utf8_lossy(&data[1..end]);
 
         Ok(SimpleError::new(s.to_string()))
+    }
+}
+
+impl RespDecode for BulkError {
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
+        let prefix = "!";
+        let end = extract_simple_frame_data(buf, prefix)?;
+
+        let data = buf.split_to(end + CRLF_LEN);
+        let s = String::from_utf8_lossy(&data[prefix.len()..end]);
+        Ok(BulkError::new(s.to_string()))
     }
 }
 
@@ -108,9 +168,15 @@ impl RespDecode for BulkString {
 impl RespDecode for Array {
     fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
         let prefix = "*";
-        let end = extract_simple_frame_data(buf, prefix)?;
-        let s = String::from_utf8_lossy(&buf[prefix.len()..end]);
-        let len = s.parse::<usize>()?;
+        let (end, len) = parse_length(buf, prefix)?;
+        let total_len = cal_total_length(buf, len, prefix)?;
+
+        if buf.len() < total_len {
+            return Err(RespError::NotComplete);
+        }
+
+        buf.advance(end + CRLF_LEN);
+
         let mut array = Vec::with_capacity(len);
         for _ in 0..len {
             let frame = RespFrame::decode(buf)?;
@@ -130,9 +196,48 @@ impl RespDecode for f64 {
     }
 }
 
+impl RespDecode for Map {
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
+        let prefix = "*";
+        let (end, len) = parse_length(buf, prefix)?;
+        let total_len = cal_total_length(buf, len, prefix)?;
+
+        if buf.len() < total_len {
+            return Err(RespError::NotComplete);
+        }
+
+        buf.advance(end + CRLF_LEN);
+
+        let mut frames = Map::new(BTreeMap::new());
+        for _ in 0..len {
+            let key = SimpleString::decode(buf)?;
+            let value = RespFrame::decode(buf)?;
+            frames.insert(key.0, value);
+        }
+
+        Ok(frames)
+    }
+}
+
 impl RespDecode for Set {
-    fn decode(_buf: &mut BytesMut) -> Result<Self, RespError> {
-        todo!()
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError> {
+        let prefix = "~";
+        let (end, len) = parse_length(buf, prefix)?;
+        let total_len = cal_total_length(buf, len, prefix)?;
+
+        if buf.len() < total_len {
+            return Err(RespError::NotComplete);
+        }
+
+        buf.advance(end + CRLF_LEN);
+
+        let mut frames = Set::new(Vec::new());
+        for _ in 0..len {
+            let frame = RespFrame::decode(buf)?;
+            frames.push(frame);
+        }
+
+        Ok(frames)
     }
 }
 
@@ -193,6 +298,19 @@ fn parse_length(buf: &[u8], prefix: &str) -> Result<(usize, usize), RespError> {
     Ok((end, s.parse()?))
 }
 
+fn cal_total_length(buf: &[u8], len: usize, prefix: &str) -> Result<usize, RespError> {
+    let data = &buf[len + CRLF_LEN..];
+    match prefix {
+        "*" | "~" => find_crlf(data, len)
+            .map(|end| len + CRLF_LEN + end)
+            .ok_or(RespError::NotComplete),
+        "%" => find_crlf(data, len * 2)
+            .map(|end| len + CRLF_LEN + end)
+            .ok_or(RespError::NotComplete),
+        _ => Ok(len + CRLF_LEN),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +362,40 @@ mod tests {
         buf.extend_from_slice(b",3.14768");
         let ret = f64::decode(&mut buf);
         assert_eq!(ret, Err(RespError::NotComplete));
+        Ok(())
+    }
+
+    #[test]
+    fn test_array_decode() -> Result<()> {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(b"*3\r\n$5\r\nhello\r\n$3\r\nfoo\r\n$3\r\nbar\r\n");
+
+        let frame = Array::decode(&mut buf)?;
+        assert_eq!(
+            frame,
+            Array::new(vec![
+                RespFrame::BulkString(BulkString::new("hello")),
+                RespFrame::BulkString(BulkString::new("foo")),
+                RespFrame::BulkString(BulkString::new("bar"))
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_decode() -> Result<()> {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(b"~2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n");
+
+        let frame = Set::decode(&mut buf)?;
+        assert_eq!(
+            frame,
+            Set::new(vec![
+                RespFrame::BulkString(BulkString::new("foo")),
+                RespFrame::BulkString(BulkString::new("bar"))
+            ])
+        );
+
         Ok(())
     }
 }
