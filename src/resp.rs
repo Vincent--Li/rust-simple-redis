@@ -77,9 +77,9 @@ pub enum RespFrame {
 }
 
 #[derive(Debug, PartialEq, PartialOrd)]
-pub struct SimpleString(String);
+pub struct SimpleString(pub(crate) String);
 #[derive(Debug, PartialEq, PartialOrd)]
-pub struct SimpleError(String);
+pub struct SimpleError(pub(crate) String);
 #[derive(Debug, PartialEq, PartialOrd)]
 pub struct NullArray;
 #[derive(Debug, PartialEq, PartialOrd)]
@@ -87,16 +87,16 @@ pub struct Null;
 #[derive(Debug, PartialEq, PartialOrd)]
 pub struct NullBulkString;
 #[derive(Debug, PartialEq, PartialOrd)]
-pub struct Array(Vec<RespFrame>);
+pub struct Array(pub(crate) Vec<RespFrame>);
 #[derive(Debug, PartialEq, PartialOrd)]
-pub struct Map(BTreeMap<String, RespFrame>);
+pub struct Map(pub(crate) BTreeMap<String, RespFrame>);
 #[derive(Debug, PartialEq, PartialOrd)]
-pub struct Set(Vec<RespFrame>);
+pub struct Set(pub(crate) Vec<RespFrame>);
 #[derive(Debug, PartialEq, PartialOrd)]
-pub struct BulkError(String);
+pub struct BulkError(pub(crate) String);
 #[derive(Debug, PartialEq, PartialOrd)]
 // when encounter struct wrapper, we could impl Deref to access inner value as if it is the inner type
-pub struct BulkString(Vec<u8>);
+pub struct BulkString(pub(crate) Vec<u8>);
 
 impl Deref for SimpleString {
     type Target = String;
