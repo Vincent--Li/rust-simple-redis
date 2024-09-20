@@ -13,9 +13,9 @@ impl TryFrom<Array> for Get {
     fn try_from(value: Array) -> Result<Self, Self::Error> {
         validate_command(&value, &["get"], 1)?;
 
-        let args = extract_args(value, 1)?;
-        match &args[0] {
-            RespFrame::BulkString(key) => Ok(Get {
+        let mut args = extract_args(value, 1)?.into_iter();
+        match args.next() {
+            Some(RespFrame::BulkString(key)) => Ok(Get {
                 key: String::from_utf8(key.0.clone())?,
             }),
             _ => Err(CommandError::InvalidArguments("invalid key".to_string())),
